@@ -1,0 +1,285 @@
+#Data Processing and Analyses to Characterize the Genome of Laricifomes officinalis
+
+conda create -n fungal_assembly
+conda activate fungal_assembly
+conda install -c conda-forge -c bioconda masurca bwa samtools quast seqkit fastqc multiqc
+
+#Raw Sequence Data QC
+##ONT Data
+conda create -n nanoplot
+conda activate nanoplot
+conda install -c bioconda -c conda-forge nanoplot
+
+seqkit stats -a ./combined_reads/combined_reads.fastq
+NanoPlot --fastq F01_Nanopore_RawReads/Fo1_A_Nanopore/fastq_pass/combined_reads/F01_Nanopore_RawReads_fastq_pass_combined.fastq --outdir F01_Nanopore_RawReads_nanoplot_QC_output
+##Illumina Data
+seqkit stats -a F01_R1.fq.gz F01_R2.fq.gz
+fastqc F01_Illumina_RawReads/*.fq.gz -o F01_Illumina_RawReads_fastqc_output
+
+#Assembly
+##Masurca
+###Config file
+DATA
+PE = pe 450 50 ../F01_Illumina_RawReads/F01_R1.fq.gz ../F01_Illumina_RawReads/F01_R2.fq.gz
+NANOPORE = ../F01_Nanopore_RawReads/Fo1_A_Nanopore/fastq_pass/combined_reads/F01_Nanopore_RawReads_fastq_pass_combined.fastq
+END
+EOF
+###Hybrid Assembly
+masurca ../F01_masurca_config.cfg
+./assemble.sh > masurca.log 2>&1) &
+
+##QUAST on un-polished assembly including mitochondrial and nuclear scaffolds
+quast.py masurca_output/CA.mr.99.17.15.0.02/primary.genome.scf.fasta -o F01_Morton_masurca_assembly_260114_quast_report -t 12 --fungus -m 200
+
+##BUSCO on un-polished assembly including mitochondrial and nuclear scaffolds
+conda create -n busco6_env python=3.10 -c conda-forge -c bioconda
+conda activate busco6_env
+conda install -c conda-forge -c bioconda busco
+
+busco -i masurca_output/CA.mr.99.17.15.0.02/primary.genome.scf.fasta -o F01_2026_Masurca_Assembly_BUSCO_output -m genome -l basidiomycota_odb10 -c 12 &
+busco -i masurca_output/CA.mr.99.17.15.0.02/primary.genome.scf.fasta -o F01_2026_Masurca_Assembly_BUSCO_output_polyporales -m genome -l polyporales_odb10 -c 12 &
+
+##Per-scaffold GC content
+seqkit fx2tab -n -l -g primary.genome.scf.fasta | sort -k2,2nr > F01_masurca_primary_scaffolds_seqkit_GC.tsv
+
+##Separate potential mitochondrial scaffolds
+echo -e "scf7180000000328" > F01_potential_mito_scf_name.txt
+echo -e "scf7180000000376" > F01_potential_mito_scf_2_name.txt
+
+seqkit grep -f F01_potential_mito_scf_name.txt primary.genome.scf.fasta > F01_masurca_potential_mito_scaffolds.fasta
+seqkit grep -f F01_potential_mito_scf_2_name.txt primary.genome.scf.fasta > F01_masurca_potential_mito_scaffolds_32kb.fasta
+
+##Per-scaffold depth
+conda create -n depth
+conda activate depth
+conda install -c conda-forge -c bioconda bwa samtools mosdepth
+bwa index primary.genome.scf.fasta
+bwa mem -t 12 primary.genome.scf.fasta ~/F01_Morton_Ref_Genome_Assembly_2026/F01_Illumina_RawReads/F01_R1.fq.gz ~/F01_Morton_Ref_Genome_Assembly_2026/F01_Illumina_RawReads/F01_R2.fq.gz | samtools sort -@ 8 -o primary.genome.scf.bam
+samtools index primary.genome.scf.bam
+samtools depth -a primary.genome.scf.bam | awk '{sum[$1]+=$3; cnt[$1]++} END {for (c in sum) print c, sum[c]/cnt[c]}' > F01_masurca_assembly_Illumina_rawreads_alignment_samtools_depth.txt
+
+##Separate mitochondrial and nuclear scaffolds
+nano mito_scaffolds_ids.txt
+scf7180000000328
+scf7180000000376
+
+seqkit grep -f mito_scaffolds_ids.txt ../masurca_output/CA.mr.99.17.15.0.02/primary.genome.scf.fasta -o F01_masurca_assembly_mitochondrial_scaffolds_only.fasta
+seqkit fx2tab -n -l -g F01_masurca_assembly_mitochondrial_scaffolds_only.fasta | sort -k2,2nr
+seqkit grep -v -f mito_scaffolds_ids.txt ../masurca_output/CA.mr.99.17.15.0.02/primary.genome.scf.fasta -o F01_masurca_assembly_nuclear_scaffolds_only.fasta
+seqkit fx2tab -n -l -g F01_masurca_assembly_nuclear_scaffolds_only.fasta | sort -k2,2nr
+
+##Polishing with Illumina reads that map to nuclear genome scaffolds only
+conda create -n pypolca_env pypolca
+bwa index F01_masurca_assembly_nuclear_scaffolds_only.fasta
+bwa mem -t 12 F01_masurca_assembly_nuclear_scaffolds_only.fasta ../F01_Illumina_RawReads/F01_R1.fq.gz ../F01_Illumina_RawReads/F01_R2.fq.gz | samtools sort -@ 8 -o F01_masurca_assembly_nuclear_scaffolds_with_raw_Illumina_mapped.bam
+samtools view -@ 8 -b -f 3 F01_masurca_assembly_nuclear_scaffolds_with_raw_Illumina_mapped.bam > F01_masurca_assembly_nuclear_scaffolds_with_raw_Illumina_mapped.proper.bam
+samtools fastq -@ 8 -1 F01_Illumina_raw_nuclear_only_R1.fastq.gz -2 F01_Illumina_raw_nuclear_only_R2.fastq.gz -0 /dev/null -s /dev/null -n F01_masurca_assembly_nuclear_scaffolds_with_raw_Illumina_mapped.proper.bam
+
+pypolca run -a F01_masurca_assembly_nuclear_scaffolds_only.fasta -1 F01_Illumina_raw_nuclear_only_R1.fastq.gz -2 F01_Illumina_raw_nuclear_only_R2.fastq.gz -t 12 -o F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output &
+
+##BUSCO on polished assembly
+busco -i F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta -o F01_2026_Masurca_NUCLEAR_Assembly_Pypolca_Polished_BUSCO_Basidiomycota_output -m genome -l basidiomycota_odb10 -c 12 &
+busco -i F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta -o F01_2026_Masurca_NUCLEAR_Assembly_Pypolca_Polished_BUSCO_Polyporales_output -m genome -l polyporales_odb10 -c 12 &
+
+##QUAST on polished assembly
+quast.py F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta -o F01_Morton_NUCLEAR_pypolca_polished_assembly_260129_quast_report --fungus -t 12
+
+#Calculate genome coverage (Mapped depth on polished assembly)
+bwa index ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta 
+bwa mem -t 12 \
+~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta \
+~/F01_Morton_Ref_Genome_Assembly_2026/F01_Illumina_RawReads/F01_R1.fq.gz \
+~/F01_Morton_Ref_Genome_Assembly_2026/F01_Illumina_RawReads/F01_R2.fq.gz \
+| samtools sort -o F01_NUCLEAR_Illumina.bam
+samtools index F01_NUCLEAR_Illumina.bam
+samtools view -c -F 260 F01_NUCLEAR_Illumina.bam
+samtools stats F01_NUCLEAR_Illumina.bam | grep "bases mapped (cigar)"
+
+minimap2 -d F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta.mmi \
+~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta
+minimap2 -ax map-ont -t 12 F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta.mmi ~/F01_SRA_Submission_260501/F01_Laricifomes_officinalis_ONT_Raw_Reads.fastq.gz > F01_ONT_Nuclear_Mapped.sam
+samtools view -bS F01_ONT_Nuclear_Mapped.sam | samtools sort -o F01_ONT_Nuclear_Mapped.sam
+samtools flagstat F01_ONT_Nuclear_Mapped.sam
+samtools coverage F01_ONT_Nuclear_Mapped.sam
+samtools depth F01_ONT_Nuclear_Mapped.sam | awk '{sum+=$3} END {print sum/NR}'
+samtools stats F01_ONT_Nuclear_Mapped.sam | grep "bases mapped"
+
+#Check for Telomere sequences in nuclear genome assembly scaffolds
+python TelomereSearch.py -i F01_Morton_2026_Masurca_NUCLEAR_Assembly_polished_pypolca_output/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta
+
+#Structural Annotation
+mamba create -n funannotate funannotate
+conda activate funannotate
+funannotate check --show-versions
+funannotate setup -d ~/funannotate_db
+echo "export FUNANNOTATE_DB=~/funannotate_db" > /home/patrickb/miniconda3/envs/funannotate/etc/conda/activate.d/funannotate.sh
+echo "unset FUNANNOTATE_DB" > /home/patrickb/miniconda3/envs/funannotate/etc/conda/deactivate.d/funannotate.sh
+funannotate test -t all --cpus 12
+funannotate clean -i F01_masurca_NUCLEAR_only_assembly_pypolca_polished.fasta -o F01_masurca_NUCLEAR_only_assembly_pypolca_polished_funannotate.cleaned.fasta
+funannotate sort -i F01_masurca_NUCLEAR_only_assembly_pypolca_polished.cleaned.fasta -o F01_masurca_NUCLEAR_only_assembly_pypolca_polished.cleaned.sorted.fasta
+
+##Repeat Masking
+conda create -n repeatmasker
+conda activate repeatmasker
+mamba install repeatmasker
+mamba install repeatmodeler
+BuildDatabase -name F01_repeatmodeler_db F01_masurca_NUCLEAR_only_assembly_pypolca_polished.cleaned.sorted.fasta
+RepeatModeler -database F01_repeatmodeler_db  -pa 4
+RepeatMasker -pa 4 \
+-lib ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/RepeatModeler_output/RM_2496888.WedFeb41736172026/consensi.fa.classified \
+-xsmall \
+~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_prep/F01_masurca_NUCLEAR_only_assembly_pypolca_polished.cleaned.sorted.fasta
+
+#Funannotate predict
+wget -O F_schrenkii_proteome_uniprot.fastq.gz "https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&query=%28%28proteome%3AUP000015241%29%29"
+wget -O P_placenta_proteome_uniprot.fastq.gz "https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&query=%28%28proteome%3AUP000194127%29%29"
+wget -O D_quercina_proteome_uniprot.fastq.gz "https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&query=%28%28proteome%3AUP000076727%29%29"
+gunzip F_schrenkii_proteome_uniprot.fastq.gz
+gunzip P_placenta_proteome_uniprot.fastq.gz
+gunzip D_quercina_proteome_uniprot.fastq.gz
+wget https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/022/598/655/GCA_022598655.1_ASM2259865v1/GCA_022598655.1_ASM2259865v1_protein.faa.gz
+mv GCA_022598655.1_ASM2259865v1_protein.faa.gz Taiwanofungus_camphoratus_V5_protein_evidence/
+cd Taiwanofungus_camphoratus_V5_protein_evidence/
+gunzip GCA_022598655.1_ASM2259865v1_protein.faa.gz
+mv GCA_022598655.1_ASM2259865v1_protein.faa Taiwanofungus_camphoratus_V5_GCA_022598655.1_protein.faa
+
+nohup funannotate predict -i F01_masurca_NUCLEAR_only_assembly_pypolca_polished.cleaned.sorted.fasta.SOFTmasked \ 
+--species "Laricifomes officinalis" \
+--strain F01 \
+--busco_seed_species coprinus_cinereus \
+--busco_db basidiomycota \
+--protein_evidence ./protein_evidence/F_schrenkii_proteome_uniprot.fastq ./protein_evidence/P_placenta_proteome_uniprot.fastq ./protein_evidence/D_quercina_proteome_uniprot.fastq Taiwanofungus_camphoratus_V5_protein_evidence/Taiwanofungus_camphoratus_V5_GCA_022598655.1_protein.faa \
+--no-evm-partitions \
+--cpus 12 \
+-o F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output \
+> softmasked_structural_funannotate_predict_260227.out 2>&1 &
+
+#Check with BUSCO in proteins mode
+busco -i ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_predict/F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output/predict_results/Laricifomes_officinalis_F01.proteins.fa \
+-l /home/patrickb/busco_downloads/lineages/basidiomycota_odb10 \
+-m proteins \
+-c 12
+
+busco -i ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_predict/F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output/predict_results/Laricifomes_officinalis_F01.proteins.fa \
+-l /home/patrickb/busco_downloads/lineages/polyporales_odb10 \
+-m proteins \
+-o F01_SOFTmasked_BUSCO_polyporales_output_260227 \
+-c 12
+
+#Functional Annotation
+##Interproscan
+mkdir my_interproscan
+cd my_interproscan
+wget https://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.77-108.0/interproscan-5.77-108.0-64-bit.tar.gz
+wget https://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.77-108.0/interproscan-5.77-108.0-64-bit.tar.gz.md5
+tar -pxvzf interproscan-5.77-108.0-*-bit.tar.gz
+
+nohup /home/patrickb/my_interproscan/interproscan-5.77-108.0/interproscan.sh \
+  -i ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_predict/F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output/predict_results/Laricifomes_officinalis_F01.proteins.fa \
+  -cpu 8 \
+  --goterms --pathways -pa \
+  -f XML,TSV,GFF3 \
+  -b interproscan_output \
+  --output-file-base F01_reference_genome_SOFTmasked_interproscan_proteins_260228 \
+ > interproscan.log 2>&1 &
+
+##Funannotate annotate
+nohup funannotate annotate -i /home/patrickb/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_predict/F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output/ \
+--antismash /home/patrickb/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/functional_annotation/F01_SOFTmasked_annotation_files/F01_Morton_Ref_Genome_2026_SOFTmasked_antiSMASH_Results/Laricifomes_officinalis_F01_SOFTMASKED_260227.gbk \
+--iprscan /home/patrickb/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/functional_annotation/F01_SOFTmasked_annotation_files/interproscan_output.xml \
+--isolate F01 \
+--strain Morton \
+--busco_db basidiomycota \
+--cpus 12 \
+-o F01_Morton_2026_Reference_Genome_SOFTmasked_Funannotate_Annotate_Output_260228 \
+> funannotate_SOFTmasked_260228.log 2>&1 &
+
+##Annotate signal peptides using Deepsig
+conda create -n deepsig
+conda activate deepsig
+mamba install -c bioconda deepsig
+
+deepsig -f ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_predict/F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output/annotate_results/Laricifomes_officinalis_Morton.proteins.fa \
+-o F01_Reference_Genome_DeepSig_Output_260302 \
+-k euk \
+-t 8
+
+#Comparative Genomics
+conda create -n mycotools
+conda activate mycotools
+mamba install mycotools
+mtdb -d
+nano ncbi_genomes.txt
+ncbiDwnld -i ncbi_genomes.txt -a -g
+update_mtdb -i polyporales_mtdb_260304 -p ~/mycotools_comparative_genomics/mycotools_260304/ncbiDwnld_20260304/ncbiDwnld.predb
+ncbiDwnld -i heterobasidion_ncbi.txt -a -g
+mtdb predb2mtdb ~/mycotools_comparative_genomics/mycotools_260304/ncbiDwnld_20260305/ncbiDwnld.predb
+mtdb update -a ~/mycotools_comparative_genomics/mycotools_260304/ncbiDwnld_20260305/predb2mtdb_20260305/predb2mtdb.mtdb 
+
+##BUSCO Phylogenomics
+git clone https://github.com/jamiemcg/BUSCO_phylogenomics
+mamba env create -f conda_env.yaml
+conda activate BUSCO_phylogenomics
+chmod +x BUSCO_phylogenomics.py
+chmod +x count_buscos.py
+
+busco -i ~/mycotools_comparative_genomics/mycotools_260304/ncbiDwnld_20260305/predb2mtdb_20260305/working/faa/hetirr1.faa  \
+-o hetirr1 \
+--out_path ~/BUSCO_phylogenomics/polypore_BUSCO_output_files_260305 \
+-m proteins \
+-l ~/busco_downloads/lineages/polyporales_odb10/ \
+-c 12
+
+###Find shared BUSCOs
+python count_buscos.py -i /home/patrickb/BUSCO_phylogenomics/polypore_BUSCO_output_files_260305 > polypores_count_buscos_output_260305.txt
+
+###Create supermatrix alignment with shared BUSCO genes
+nohup python BUSCO_phylogenomics.py -i /home/patrickb/BUSCO_phylogenomics/polypore_BUSCO_output_files_260305 --supermatrix_only -o BUSCO_phylogenomics_supermatrix_output_260305 -t 12 > BUSCO_phylogenomics_supermatrix_260305.log 2>&1 &
+
+###IQ-tree
+conda create -n iqtree
+conda activate iqtree
+mamba install -c bioconda iqtree
+nohup iqtree -s SUPERMATRIX.phylip \
+--prefix F01_polyporales_BUSCO_860_iqtree_260305 \
+-T AUTO \
+--threads-max 8 \
+--quiet \
+-p SUPERMATRIX.partitions.nex \
+-B 1000 \
+-m MFP \
+--merge rclusterf\
+> F01_polyporales_iqtree_BUSCO_860_260305_nohup.log 2>&1 &
+
+#Synteny analysis
+conda create -n syny
+conda activate syny
+mamba install syny -c conda-forge -c bioconda
+
+nohup run_syny.pl \
+  -t 12 \
+  --minsize 500000 \
+  -a ~/F01_Morton_Ref_Genome_Assembly_2026/F01_2026_Masurca_Nuclear_Genome_Assembly_and_Annotation_Files/F01_Morton_2026_Nuclear_Reference_Genome_Annotation/funannotate_predict/F01_260227_SOFTmasked_genemark_seedspecies_CC_protein_evidence_NO_EVM_partitions_funannotate_predict_output/annotate_results/Laricifomes_officinalis_Morton.gbk ~/F01_reference_genome_synteny_analysis/GCF_001632365.1_Laesu1_genomic.gbff \
+  -o ~/F01_reference_genome_synteny_analysis/SYNY \
+> F01_Laesul1_SYNY_synteny_260311_nohup.log 2>&1 &
+
+#AGAT on Taiwanofungus camphoratus AcV5 GFF
+conda create -n agat -c bioconda -c conda-forge agat
+
+agat_sp_fix_overlaping_genes.pl --gff Taiwanofungus-GCA_022598655.1-genomic.gff -o Taiwanofungus-GCA_022598655.1-merged-loci-agat.gff
+agat_sp_keep_longest_isoform.pl --gff Taiwanofungus-GCA_022598655.1-merged-loci-agat.gff -o Taiwanofungus-GCA_022598655.1-longest-isoform.gff
+
+### Mitochondrial Genome Assembly
+conda create -n Mito
+conda activate Mito
+conda install GetOrganelle
+
+get_organelle_config.py --add fungus_mt
+
+get_organelle_from_reads.py -1 F01_R1.fq.gz -2 F01_R2.fq.gz -s F01_masurca_assembly_mitochondrial_scaffolds_only.fasta -F fungus_mt -o get_organelle_reads_OUTPUT
+
+#Mapping ONT reads to Mitochondrial Genome
+minimap2 -ax map-ont -t 8 fungus_mt.K115.complete.graph1.1.path_sequence.fasta F01_Nanopore_RawReads_fastq_pass_combined.fastq > F01-long-read-mapping-to-path-1.1.sam
+samtools view -S -b F01-long-read-mapping-to-path-1.1.sam > F01-long-read-mapping-to-path-1.1.bam
+samtools sort F01-long-read-mapping-to-path-1.1.bam -o F01-long-read-mapping-to-path-1.1_sorted.bam
+samtools depth F01-long-read-mapping-to-path-1.1_sorted.bam | awk '{sum+=$3} END { print "Average Coverage = ",sum/NR}'
