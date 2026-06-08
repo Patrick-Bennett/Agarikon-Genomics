@@ -1,0 +1,269 @@
+#R Scripts for Reproducing Agarikon Genomics Manuscript Figures
+
+# Circlize
+library(circlize)
+library(RColorBrewer)
+library(tidyr)
+library(dplyr)
+
+layout <- read.table("Laricifomes_officinalis_Morton.scaffolds.fa.fai")[, 1:2]
+colnames(layout) <- c("chr", "end")
+layout$start <- 0
+layout <- layout[, c("chr", "start", "end")]
+
+gff <- read.table("Laricifomes_officinalis_Morton.gff3", sep="\t", quote="")
+genes_only <- gff[gff$V3 == "gene", ]
+
+genes_bed <- genes_only[, c(1, 4, 5)]
+colnames(genes_bed) <- c("chr", "start", "end")
+
+write.table(genes_bed, "genes.bed", sep="\t", quote=F, row.names=F, col.names=F)
+
+genes <- read.table("genes.bed")
+colnames(genes) <- c("chr", "start", "end")
+
+layout$chr <- gsub("scaffold_", "scf_", layout$chr)
+
+layout_40<-head(layout,40)
+
+genes$chr <- gsub("scaffold_", "scf_", genes$chr)
+
+gene_indices <- match(genes$chr, layout_40$chr)
+
+genes_40 <- genes[!is.na(gene_indices), ]
+genes_40$chr <- match(genes_40$chr, layout_40$chr)
+layout_40$chr<- 1:nrow(layout_40)
+
+gc_raw <- read.table("F01_gc.txt", header = FALSE, stringsAsFactors = FALSE)
+colnames(gc_raw) <- c("name", "gc")
+
+
+gc_df <- gc_raw %>%
+  tidyr::separate(name, into = c("chr", "coords"), sep = "_sliding:") %>%
+  tidyr::separate(coords, into = c("start", "end"), sep = "-") %>%
+  mutate(start = as.numeric(start), end=as.numeric(end),gc=as.numeric(gc))
+
+gc_df <- gc_df %>%
+  mutate(scaffold_num = as.numeric(sub("scaffold_", "", chr)))
+
+gc_df <- gc_df %>%
+  filter(scaffold_num >= 1 & scaffold_num <= 40)
+
+gc_df <- gc_df %>%
+  mutate(chr = as.character(scaffold_num)) %>%
+  select(chr, start, end, gc)
+
+rm_out <- read.table("F01_RepeatMasker.fasta.out", skip = 3, fill = TRUE, stringsAsFactors = FALSE)
+
+repeats <- data.frame(
+  chr   = rm_out$V5,
+  start = as.numeric(rm_out$V6),
+  end   = as.numeric(rm_out$V7))
+
+repeats <- repeats %>%
+  mutate(chr_num = as.numeric(sub("scaffold_", "", chr))) %>%
+  filter(chr_num >= 1 & chr_num <= 40) %>%
+  mutate(chr = as.character(chr_num)) %>%
+  select(chr, start, end)
+
+circos.clear()
+circos.par(
+  "start.degree" = 90, 
+  "gap.degree" = 0, 
+  "track.margin" = c(0, 0),
+  "cell.padding" = c(0.0025, 0.25, 0.0025, 0.25))
+
+circos.initialize(
+  factors = layout_40$chr,
+  xlim = layout_40[, c("start", "end")])
+
+circos.track(ylim = c(0, 1), panel.fun = function(x, y) {
+  chr = CELL_META$sector.index
+  xlim = CELL_META$xlim
+  ylim = CELL_META$ylim
+  
+circos.rect(xlim[1], 0, xlim[2], 1, col = blues[9],border=NA)
+circos.text(mean(xlim), mean(ylim), chr, cex = 0.5, col = "white", nfacing = "inside", niceFacing = TRUE)}, track.height = 0.08,bg.border="grey")
+
+circos.genomicDensity(
+  genes_40,
+  col = "#33A02C",
+  window.size=50000,
+  #count_by="number",
+  track.height=0.15, bg.border="grey")
+
+circos.genomicTrack(
+  gc_df,
+  panel.fun = function(region, value, ...) {
+    circos.lines(
+      x = rowMeans(region),
+      y = value$gc,
+      col = "#6A3D9A",
+      lwd = 1)}, track.height=0.15, bg.border="grey")
+
+circos.genomicTrack(
+  repeats,
+  ylim = c(0, 1),
+  track.height = 0.1,
+  bg.border = "grey",
+  panel.fun = function(region, value, ...) {
+    #cols <- repeat_colors[value$repeat_class]
+    circos.genomicRect(
+      region,
+      ybottom = 0,
+      ytop = 1,
+      col = oranges[5],
+      border = NA,
+      lwd=1)})
+
+# Phylogeny
+library(tidyverse)
+library(reshape2)
+library(ggtree)
+library(treeio)
+library(tidytree)
+library(ape)
+library(phytools)
+
+tree<-read.tree("F01_polyporales_BUSCO_860_iqtree_260305.treefile")
+outgroup_node <- which(tree$tip.label == "hetirr1")
+tree<-reroot(tree,node.number=outgroup_node, position = 0.5 * tree$edge.length[which(tree$edge[,2] == outgroup_node)])
+taxa<-read.csv("F01_polyporales_phylogenomic_ggtree_tiplabs.csv")
+
+tree$node.label[tree$node.label == "Root"] <- ""
+
+focal<-"Laricifomes officinalis"
+
+p<- ggtree(tree,ladderize=TRUE) %<+% taxa 
+p<-p+geom_tiplab(aes(label = ifelse(new_name == focal,
+                     paste0("bolditalic('", new_name, "')"),
+                     paste0("italic('", new_name, "')"))),parse=TRUE) +
+  geom_nodelab(aes(label=label),hjust=1.2,vjust=-0.5,size=3)+
+  hexpand(0.2)
+
+# Bar Graphs
+library(tidyverse)
+library(reshape2)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(stringr)
+
+# Summarize clusters of orthologous groups (COGs)
+blues <- brewer.pal(9, "Blues")
+F01_Annotations<-read.csv("F01_Morton_2026_Reference_Genome_Final_260302.annotations.csv")
+COGs <- F01_Annotations %>%
+  filter(COG != "") %>%
+  separate_rows(COG,sep=";") %>%
+  mutate(first_letter = substr(COG, 1, 1), legend_label = substr(COG, 3, nchar(COG)))
+  
+cog_counts<-COGs %>% 
+  count(first_letter,legend_label)
+
+ggplot(cog_counts,aes(x=reorder(legend_label, n), y=n)) +
+  geom_col(color="black",fill=blues[9],width=1) +
+  geom_text(aes(label = n), hjust = -0.25, size = 5) +
+  coord_flip()+
+  scale_y_continuous(expand = expansion(mult = c(0.0025, 0.125)))+
+  labs(x = "Cluster Classification",
+    y = "Number of Genes") +
+  theme(panel.grid = element_blank(),
+        axis.text.y = element_text(size = 14),
+        axis.text.x = element_text(size = 14),
+        axis.title.x=element_text(face="bold", size=16),
+        axis.title.y=element_text(face="bold", size=16),
+        plot.margin=margin(t=10, r=10, b=20, l=20))
+
+# GO Terms
+
+go_count <- F01_Annotations %>%
+  filter(GO.Terms != "") %>%
+  separate_rows(GO.Terms, sep = ";") %>%
+  mutate(GO.Terms = trimws(GO.Terms)) %>%
+   count(GO.Terms, sort = TRUE)
+
+go_clean <- go_count %>%
+  mutate(
+    ontology = str_extract(GO.Terms, "GO_[^:]+") %>%
+               str_remove("GO_"),                   
+    GO_ID = str_extract(GO.Terms, "GO:\\d+"),
+    label = str_extract(GO.Terms, "- .*\\[") %>%
+            str_remove("^- ") %>%
+            str_remove(" \\[.*") %>%
+            str_trim())
+
+top_go <- go_clean %>%
+  group_by(ontology) %>%
+  slice_max(n, n = 30) %>%
+  ungroup()
+
+top_go <- top_go %>%
+  group_by(ontology) %>%
+  arrange(n, .by_group = TRUE)
+
+top_go <- top_go %>%
+  mutate(ontology = factor(ontology, levels = c(
+      "Biological Process",
+      "Molecular Function",
+      "Cellular Component")))
+
+top_go <- top_go %>%
+  mutate(label = str_trunc(label, 60))
+
+top_go <- top_go %>%
+  group_by(ontology) %>%
+  arrange(n) %>%
+  mutate(label = factor(label, levels = unique(label))) %>%
+  ungroup()
+
+go_colors <- c(
+"Biological Process" = "#2c7fb8", 
+ "Cellular Component"  = "#de2d26",  
+ "Molecular Function" = "#31a35)
+
+ggplot(top_go, aes(x = reorder(label, n), y = n, fill = ontology)) +
+  geom_col(color="black",width=1) +
+  geom_text(aes(label = n), hjust = -0.2, size = 5) +
+  coord_flip() +
+  facet_grid(ontology~., scales = "free_y",space="free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  scale_fill_manual(values = go_colors) +
+  labs(x = "GO terms", y = "Number of Genes") +
+  theme(axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14),
+    strip.text = element_text(face = "bold", size = 18),
+    strip.background = element_blank(),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    axis.title.x=element_text(face="bold", size=18),
+    axis.title.y=element_text(face="bold", size=18))
+
+# Pfam
+pfam_data <- F01_Annotations %>%
+  filter(PFAM != "") %>%
+  separate_rows(PFAM, sep = ";") %>%
+  mutate(Pfam = trimws(PFAM)) %>%
+  count(Pfam, sort = TRUE) %>%
+  slice_head(n = 50)
+
+pfam <- read.delim("Pfam-A.clans.tsv",header=FALSE,sep="\t")
+pfam_counts_with_desc <- pfam_data %>%
+  inner_join(pfam, by = c("Pfam" = "V1"))
+
+pfam_counts_with_desc <- pfam_counts_with_desc %>% mutate(label = paste(Pfam, V5, sep = " "))
+
+oranges<-brewer.pal(9,"Oranges")
+
+ggplot(pfam_counts_with_desc,aes(x=reorder(label, n), y=n)) +
+  geom_col(color="black",fill=oranges[6],width=1) +
+  geom_text(aes(label = n), hjust = -0.25, size = 5) +
+  coord_flip()+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  labs(x = "Pfam Domains",
+  y = "Number of Genes")+
+  theme(panel.grid = element_blank(),
+        axis.text.y = element_text(size = 14),
+        axis.text.x = element_text(size = 14),
+        axis.title.x=element_text(face="bold", size=18),
+        axis.title.y=element_text(face="bold", size=18),
+        plot.margin=margin(t=10, r=10, b=20, l=20))
