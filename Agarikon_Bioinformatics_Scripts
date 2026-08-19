@@ -1,9 +1,5 @@
 # Data Processing and Analyses to Characterize the Genome of Laricifomes officinalis
 
-conda create -n fungal_assembly
-conda activate fungal_assembly
-conda install -c conda-forge -c bioconda masurca bwa samtools quast seqkit fastqc multiqc
-
 # Raw Sequence Data QC
 ## ONT Data
 conda create -n nanoplot
@@ -18,6 +14,10 @@ seqkit stats -a F01_R1.fq.gz F01_R2.fq.gz
 fastqc F01_Illumina_RawReads/*.fq.gz -o F01_Illumina_RawReads_fastqc_output
 
 # Assembly
+conda create -n fungal_assembly
+conda activate fungal_assembly
+conda install -c conda-forge -c bioconda masurca bwa samtools quast seqkit fastqc multiqc
+
 ## Masurca
 ### Config file
 DATA
